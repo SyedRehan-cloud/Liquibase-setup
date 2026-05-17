@@ -1,4 +1,4 @@
-# 🚀 Liquibase — Complete Explanation
+# Liquibase — Complete Explanation
 
 ## 1. What is Liquibase?
 
@@ -10,7 +10,7 @@ Liquibase is an open-source tool that helps you:
 * Roll back changes safely
 * Ensure consistency across Dev / QA / Prod
 
-👉 In simple terms:
+In simple terms:
 
 > Liquibase is Git for your database, with enterprise-grade control.
 
@@ -261,7 +261,6 @@ Because it provides:
 * Safe for production systems
 * Works with CI/CD pipelines
 
----
 
 # 13. Disadvantages
 
@@ -275,5 +274,3 @@ Because it provides:
 # 14. Simple Summary
 
 > Liquibase is an enterprise-grade database change management tool that uses structured “changesets” to version, track, and safely deploy database schema changes with strong rollback and auditing capabilities.
-
-Just tell 👍
