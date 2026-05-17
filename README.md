@@ -1,5 +1,36 @@
 # Liquibase — Complete Detailed Explanation
 
+
+## Table of Contents
+
+* [1. What is Liquibase?](#1-what-is-liquibase)
+* [2. Why Liquibase is Required](#2-why-liquibase-is-required)
+
+  * [2.1 Problems Without Liquibase](#21-problems-without-liquibase)
+* [3. How Liquibase Solves These Problems](#3-how-liquibase-solves-these-problems)
+* [4. Core Concept — Changesets](#4-core-concept--changesets)
+* [5. Supported Changelog Formats](#5-supported-changelog-formats)
+* [6. How Liquibase Works Internally](#6-how-liquibase-works-internally)
+* [7. Liquibase Architecture](#7-liquibase-architecture)
+* [8. Important Internal Tables](#8-important-internal-tables)
+
+  * [8.1 DATABASECHANGELOG](#8-important-internal-tables)
+  * [8.2 DATABASECHANGELOGLOCK](#8-important-internal-tables)
+* [9. Step-by-Step Execution Process](#9-step-by-step-execution-process)
+* [10. Rollback Support](#10-rollback-support-major-enterprise-feature)
+* [11. Checksums and Change Integrity](#11-checksums-and-change-integrity)
+* [12. Preconditions](#12-preconditions)
+* [13. Integration with CI/CD Pipelines](#13-integration-with-ci-cd-pipelines)
+* [14. Liquibase Commands](#14-liquibase-commands)
+* [15. Typical Project Structure](#15-typical-project-structure)
+* [16. Liquibase vs Flyway vs Atlas](#16-liquibase-vs-flyway-vs-atlas)
+* [17. Advantages of Liquibase](#17-advantages-of-liquibase)
+* [18. Disadvantages of Liquibase](#18-disadvantages-of-liquibase)
+* [19. Real Enterprise Usage](#19-real-enterprise-usage)
+* [20. Where Liquibase Fits in System Design](#20-where-liquibase-fits-in-system-design)
+* [21. Simple Mental Model](#21-simple-mental-model)
+* [22. Final Summary](#22-final-summary)
+---
 ## 1. What is Liquibase?
 
 Liquibase is an open-source **database change management** and **schema migration** tool used to manage, track, version-control, and automate database changes across multiple environments.
