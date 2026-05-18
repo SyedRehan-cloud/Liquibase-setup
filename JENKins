@@ -16,14 +16,10 @@ pipeline {
 
         choice(name: 'ENVIRONMENT',
             choices: ['DEV', 'STAGING', 'PRODUCTION'],
-            description: 'Target deployment environment'
+            description: 'Target environment'
         )
 
-        string(
-            name: 'ROLLBACK_COUNT',
-            defaultValue: '1',
-            description: 'Rollback count (only for rollback)'
-        )
+        string(name: 'ROLLBACK_COUNT', defaultValue: '1')
     }
 
     environment {
@@ -32,8 +28,6 @@ pipeline {
         REMOTE_USER = "ubuntu"
 
         DB_HOST = "localhost"
-        DB_PORT = "5432"
-        DB_NAME = "appdb"
         DB_USER = "admin"
         DB_PASS = "admin"
 
@@ -42,26 +36,24 @@ pipeline {
 
     stages {
 
-        /* =========================
-           1. AUDIT INFO
-           ========================= */
-        stage('Capture Build Info') {
+        /* ========================= */
+        stage('Audit Capture') {
+        /* ========================= */
 
             steps {
                 script {
 
-                    env.TRIGGERED_BY = currentBuild.getBuildCauses()[0]?.userId ?: "Unknown User"
+                    env.TRIGGERED_BY = currentBuild.getBuildCauses()[0]?.userName ?: "Unknown User"
 
-                    env.AUDIT =
-"""
+                    env.AUDIT = """
 ================ DB CHANGE AUDIT ================
-User         : ${env.TRIGGERED_BY}
-Action       : ${params.ACTION}
-Environment  : ${params.ENVIRONMENT}
-Rollback     : ${params.ROLLBACK_COUNT}
-Job          : ${env.JOB_NAME}
-Build        : ${env.BUILD_NUMBER}
-URL          : ${env.BUILD_URL}
+User        : ${env.TRIGGERED_BY}
+Action      : ${params.ACTION}
+Environment : ${params.ENVIRONMENT}
+Rollback    : ${params.ROLLBACK_COUNT}
+Job         : ${env.JOB_NAME}
+Build       : ${env.BUILD_NUMBER}
+URL         : ${env.BUILD_URL}
 =================================================
 """
 
@@ -70,49 +62,41 @@ URL          : ${env.BUILD_URL}
             }
         }
 
-        /* =========================
-           2. CHANGE CLASSIFICATION
-           ========================= */
-        stage('Change Classification & Safety Check') {
+        /* ========================= */
+        stage('Policy Engine (REAL SAFETY)') {
+        /* ========================= */
 
             steps {
                 script {
 
-                    echo "Classifying DB change type..."
+                    echo "Running Policy Engine..."
 
-                    if (params.ENVIRONMENT == 'PRODUCTION' &&
-                        params.ACTION in ['UPDATE', 'UPDATESQL']) {
+                    env.RISK = "LOW"
 
-                        echo "⚠ PROD sensitive operation detected"
-                        env.HIGH_RISK = "YES"
+                    if (params.ENVIRONMENT == "PRODUCTION") {
+                        env.RISK = "HIGH"
                     }
 
-                    if (params.ACTION == 'ROLLBACK') {
-                        echo "Rollback operation detected"
-                        env.ROLLBACK_OP = "YES"
+                    if (params.ACTION == "ROLLBACK") {
+                        env.RISK = "MEDIUM"
                     }
 
-                    // HARD SAFETY RULES
-                    if (params.ENVIRONMENT == 'PRODUCTION' &&
-                        params.ACTION == 'UPDATE') {
-
-                        echo "PROD UPDATE requires strict approval"
-                        env.PROD_STRICT_APPROVAL = "YES"
+                    if (params.ACTION == "UPDATE" && params.ENVIRONMENT == "PRODUCTION") {
+                        env.RISK = "CRITICAL"
                     }
 
-                    echo "Safety classification complete"
+                    echo "Risk Level: ${env.RISK}"
+
+                    if (env.RISK == "CRITICAL") {
+                        error("❌ CRITICAL risk detected. Manual approval required.")
+                    }
                 }
             }
         }
 
-        /* =========================
-           3. NOTIFICATION (EMAIL + SLACK)
-           ========================= */
-        stage('Notify Admin (Email + Slack)') {
-
-            when {
-                expression { params.ENVIRONMENT != 'DEV' }
-            }
+        /* ========================= */
+        stage('Notify (Email + Slack)') {
+        /* ========================= */
 
             steps {
 
@@ -120,27 +104,20 @@ URL          : ${env.BUILD_URL}
 
                     def approvalLink = "${env.BUILD_URL}input/"
 
-                    def msg =
-"""
-🚨 LIQUIBASE DEPLOYMENT APPROVAL REQUIRED
+                    def msg = """
+🚨 LIQUIBASE APPROVAL REQUIRED
 
-User        : ${env.TRIGGERED_BY}
-Action      : ${params.ACTION}
-Environment : ${params.ENVIRONMENT}
+${env.AUDIT}
 
-⚠ RISK LEVEL:
-${env.HIGH_RISK ?: "LOW/MEDIUM"}
+Risk Level : ${env.RISK}
 
-JOB         : ${env.JOB_NAME}
-BUILD       : ${env.BUILD_NUMBER}
-
-👉 APPROVE HERE:
+👉 Approve here:
 ${approvalLink}
 """
 
                     emailext(
                         to: "rehan.ali9325@gmail.com",
-                        subject: "Liquibase Approval Required - ${params.ENVIRONMENT}",
+                        subject: "Liquibase Approval - ${params.ENVIRONMENT}",
                         body: msg
                     )
 
@@ -153,131 +130,66 @@ ${approvalLink}
             }
         }
 
-        /* =========================
-           4. APPROVAL GATE (MATRIX)
-           ========================= */
-        stage('Approval Gate (Policy Engine)') {
+        /* ========================= */
+        stage('Approval Gate (ENFORCEMENT ONLY)') {
+        /* ========================= */
 
             when {
-                expression { params.ENVIRONMENT != 'DEV' }
-            }
-
-            steps {
-
-                timeout(time: 45, unit: 'MINUTES') {
-
-                    script {
-
-                        def approvers = "admin,devops"
-
-                        if (params.ENVIRONMENT == 'STAGING') {
-                            approvers = "admin,devops,qa"
-                        }
-
-                        if (params.ENVIRONMENT == 'PRODUCTION') {
-                            approvers = "admin,db-admin,release-manager,CAB"
-                        }
-
-                        if (params.ACTION in ['UPDATE', 'ROLLBACK']) {
-                            approvers += ",senior-dba"
-                        }
-
-                        input message: """
-================ APPROVAL REQUIRED ================
-
-${env.AUDIT}
-
-⚠ APPROVERS REQUIRED:
-${approvers}
-
-Approve or Abort deployment
-===================================================
-""",
-                        ok: "APPROVE DEPLOYMENT",
-                        submitter: approvers
-                    }
-                }
-            }
-        }
-
-        /* =========================
-           5. PROD HARD GUARD
-           ========================= */
-        stage('Production Safety Guard') {
-
-            when {
-                expression { params.ENVIRONMENT == 'PRODUCTION' }
+                expression { params.ENVIRONMENT != "DEV" }
             }
 
             steps {
 
                 script {
 
-                    if (params.ACTION in ['UPDATE', 'UPDATESQL']) {
+                    timeout(time: 30, unit: 'MINUTES') {
 
                         input message: """
-🚨 FINAL CONFIRMATION REQUIRED
+APPROVAL REQUIRED
 
-You are executing ${params.ACTION} on PRODUCTION
+${env.AUDIT}
 
-Proceed only if fully validated
+Risk: ${env.RISK}
+
+Approve deployment?
 """,
-                        ok: "CONFIRM PRODUCTION DEPLOYMENT"
+                        ok: "APPROVE"
                     }
                 }
             }
         }
 
-        /* =========================
-           6. LIQUIBASE EXECUTION
-           ========================= */
-        stage('Run Liquibase on EC2') {
+        /* ========================= */
+        stage('Execute Liquibase') {
+        /* ========================= */
 
             steps {
 
                 sshagent(credentials: ['liquibase-ci-key']) {
 
                     sh """
-                    ssh -T -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} '
+                    ssh ${REMOTE_USER}@${REMOTE_HOST} '
                         set -e
-
-                        echo "========== DEPLOYMENT START =========="
-                        echo "${env.AUDIT}"
-
                         cd ${WORKDIR}
 
-                        echo "Liquibase Version"
-                        ./liquibase --version
+                        echo "${env.AUDIT}"
 
-                        echo "DB State"
-                        PGPASSWORD=${DB_PASS} psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c "\\\\dt"
-
-                        echo "VALIDATE"
                         ./liquibase validate
 
-                        echo "PREVIEW SQL"
-                        ./liquibase updateSQL
-
-                        echo "EXECUTING ACTION: ${params.ACTION}"
-
-                        if [ "${params.ACTION}" = "VALIDATE" ]; then
-                            ./liquibase validate
-
-                        elif [ "${params.ACTION}" = "UPDATESQL" ]; then
-                            ./liquibase updateSQL
-
-                        elif [ "${params.ACTION}" = "UPDATE" ]; then
+                        if [ "${params.ACTION}" = "UPDATE" ]; then
                             ./liquibase update
 
                         elif [ "${params.ACTION}" = "ROLLBACK" ]; then
                             ./liquibase rollbackCount ${params.ROLLBACK_COUNT}
+
+                        elif [ "${params.ACTION}" = "UPDATESQL" ]; then
+                            ./liquibase updateSQL
+
+                        else
+                            ./liquibase validate
                         fi
 
-                        echo "HISTORY"
                         ./liquibase history
-
-                        echo "CHANGE COUNT"
-                        PGPASSWORD=${DB_PASS} psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c "SELECT COUNT(*) FROM databasechangelog;"
                     '
                     """
                 }
@@ -285,25 +197,18 @@ Proceed only if fully validated
         }
     }
 
-    /* =========================
-       POST
-       ========================= */
     post {
 
         success {
-            echo "Liquibase Deployment SUCCESS"
+            echo "DEPLOYMENT SUCCESS"
         }
 
         failure {
-            echo "Liquibase Deployment FAILED"
+            echo "DEPLOYMENT FAILED"
         }
 
         aborted {
-            echo "Deployment ABORTED by user"
-        }
-
-        always {
-            echo "Pipeline Execution Completed"
+            echo "USER ABORTED DEPLOYMENT"
         }
     }
 }
