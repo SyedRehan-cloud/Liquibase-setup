@@ -334,6 +334,7 @@ Unsafe DELETE without WHERE detected in ${file}
 
                         if (
                             file.endsWith(".xml") &&
+                            content.contains("<changeset") &&
                             !content.contains("<rollback>")
                         ) {
 
@@ -522,10 +523,6 @@ Approve or Abort deployment
 
                         echo "${env.AUDIT}"
 
-                        ${LIQUIBASE_CMD} validate
-
-                        ${LIQUIBASE_CMD} updateSQL
-
                         if [ "${params.ACTION}" = "VALIDATE" ]; then
 
                             ${LIQUIBASE_CMD} validate
@@ -536,6 +533,8 @@ Approve or Abort deployment
 
                         elif [ "${params.ACTION}" = "UPDATE" ]; then
 
+                            ${LIQUIBASE_CMD} validate
+                            ${LIQUIBASE_CMD} updateSQL
                             ${LIQUIBASE_CMD} update
 
                         elif [ "${params.ACTION}" = "ROLLBACK_COUNT" ]; then
