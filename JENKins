@@ -269,10 +269,12 @@ TRUNCATE is NOT allowed in any environment.
                            UPDATE WITHOUT WHERE
                         ========================================= */
 
-                        if (
-                            content =~
-                            /update\\s+.+\\s+set\\s+(?!.*where)/s
-                        ) {
+                        def unsafeUpdate =
+                            content.contains("update") &&
+                            content.contains(" set ") &&
+                            !content.contains(" where ")
+
+                        if (unsafeUpdate) {
 
                             error("""
 Unsafe UPDATE without WHERE detected in ${file}
@@ -283,10 +285,11 @@ Unsafe UPDATE without WHERE detected in ${file}
                            DELETE WITHOUT WHERE
                         ========================================= */
 
-                        if (
-                            content =~
-                            /delete\\s+from\\s+.+(?!.*where)/s
-                        ) {
+                        def unsafeDelete =
+                            content.contains("delete from") &&
+                            !content.contains(" where ")
+
+                        if (unsafeDelete) {
 
                             error("""
 Unsafe DELETE without WHERE detected in ${file}
@@ -336,6 +339,7 @@ Unsafe DELETE without WHERE detected in ${file}
 
                             error("""
 Rollback block missing in ${file}
+
 All changesets must contain rollback.
 """)
                         }
@@ -361,9 +365,11 @@ All changesets must contain rollback.
 
                     echo "Applying Production Safeguards"
 
-                    if (params.ACTION == 'ROLLBACK_COUNT' ||
+                    if (
+                        params.ACTION == 'ROLLBACK_COUNT' ||
                         params.ACTION == 'ROLLBACK_TAG' ||
-                        params.ACTION == 'ROLLBACK_CHANGESET') {
+                        params.ACTION == 'ROLLBACK_CHANGESET'
+                    ) {
 
                         error("""
 Rollback operations are BLOCKED in PRODUCTION
@@ -485,6 +491,8 @@ Approve or Abort deployment
 
                         mkdir -p ${WORKDIR}/backup
 
+                        export PGPASSWORD=${DB_PASS}
+
                         pg_dump \
                         -h ${DB_HOST} \
                         -U ${DB_USER} \
@@ -518,7 +526,15 @@ Approve or Abort deployment
 
                         ${LIQUIBASE_CMD} updateSQL
 
-                        if [ "${params.ACTION}" = "UPDATE" ]; then
+                        if [ "${params.ACTION}" = "VALIDATE" ]; then
+
+                            ${LIQUIBASE_CMD} validate
+
+                        elif [ "${params.ACTION}" = "UPDATESQL" ]; then
+
+                            ${LIQUIBASE_CMD} updateSQL
+
+                        elif [ "${params.ACTION}" = "UPDATE" ]; then
 
                             ${LIQUIBASE_CMD} update
 
@@ -532,8 +548,8 @@ Approve or Abort deployment
 
                         elif [ "${params.ACTION}" = "ROLLBACK_CHANGESET" ]; then
 
-                            ${LIQUIBASE_CMD} rollbackOneChangeSet \\
-                            --changesetId=${params.CHANGESET_ID} \\
+                            ${LIQUIBASE_CMD} rollbackOneChangeSet \
+                            --changesetId=${params.CHANGESET_ID} \
                             --changesetAuthor=${params.CHANGESET_AUTHOR}
 
                         fi
@@ -565,8 +581,7 @@ Approve or Abort deployment
 
                         cd ${WORKDIR}
 
-                        ${LIQUIBASE_CMD} tag \
-                        release_${BUILD_NUMBER}
+                        ${LIQUIBASE_CMD} tag release_${BUILD_NUMBER}
                     '
                     """
                 }
