@@ -11,7 +11,7 @@ pipeline {
 
         choice(name: 'ACTION',
             choices: ['VALIDATE', 'UPDATESQL', 'UPDATE', 'ROLLBACK'],
-            description: 'Select Liquibase operation'
+            description: 'Liquibase operation'
         )
 
         choice(name: 'ENVIRONMENT',
@@ -19,7 +19,10 @@ pipeline {
             description: 'Target environment'
         )
 
-        string(name: 'ROLLBACK_COUNT', defaultValue: '1')
+        string(name: 'ROLLBACK_COUNT',
+            defaultValue: '1',
+            description: 'Rollback count'
+        )
     }
 
     environment {
@@ -28,6 +31,7 @@ pipeline {
         REMOTE_USER = "ubuntu"
 
         DB_HOST = "localhost"
+        DB_NAME = "appdb"
         DB_USER = "admin"
         DB_PASS = "admin"
 
@@ -36,14 +40,12 @@ pipeline {
 
     stages {
 
-        /* ========================= */
-        stage('Audit Capture') {
-        /* ========================= */
-
+        /* ================= AUDIT ================= */
+        stage('Audit') {
             steps {
                 script {
 
-                    env.TRIGGERED_BY = currentBuild.getBuildCauses()[0]?.userName ?: "Unknown User"
+                    env.TRIGGERED_BY = currentBuild.getBuildCauses()[0]?.userId ?: "Unknown User"
 
                     env.AUDIT = """
 ================ DB CHANGE AUDIT ================
@@ -62,57 +64,49 @@ URL         : ${env.BUILD_URL}
             }
         }
 
-        /* ========================= */
-        stage('Policy Engine (REAL SAFETY)') {
-        /* ========================= */
-
+        /* ============== POLICY ENGINE ============== */
+        stage('Policy Engine') {
             steps {
                 script {
 
-                    echo "Running Policy Engine..."
-
                     env.RISK = "LOW"
 
-                    if (params.ENVIRONMENT == "PRODUCTION") {
+                    if (params.ENVIRONMENT == 'PRODUCTION') {
                         env.RISK = "HIGH"
                     }
 
-                    if (params.ACTION == "ROLLBACK") {
+                    if (params.ACTION == 'ROLLBACK') {
                         env.RISK = "MEDIUM"
                     }
 
-                    if (params.ACTION == "UPDATE" && params.ENVIRONMENT == "PRODUCTION") {
+                    if (params.ENVIRONMENT == 'PRODUCTION' &&
+                        params.ACTION in ['UPDATE', 'UPDATESQL']) {
                         env.RISK = "CRITICAL"
                     }
 
                     echo "Risk Level: ${env.RISK}"
-
-                    if (env.RISK == "CRITICAL") {
-                        error("❌ CRITICAL risk detected. Manual approval required.")
-                    }
                 }
             }
         }
 
-        /* ========================= */
-        stage('Notify (Email + Slack)') {
-        /* ========================= */
+        /* ============== NOTIFY ONLY ============== */
+        stage('Notify Admin') {
+
+            when {
+                expression { params.ENVIRONMENT != 'DEV' }
+            }
 
             steps {
-
                 script {
-
-                    def approvalLink = "${env.BUILD_URL}input/"
 
                     def msg = """
 🚨 LIQUIBASE APPROVAL REQUIRED
 
 ${env.AUDIT}
-
 Risk Level : ${env.RISK}
 
-👉 Approve here:
-${approvalLink}
+NO ACTION REQUIRED IN EMAIL
+Approve in Jenkins UI
 """
 
                     emailext(
@@ -121,72 +115,65 @@ ${approvalLink}
                         body: msg
                     )
 
-                    slackSend(
-                        channel: "#deployments",
-                        color: "#FFA500",
-                        message: msg
-                    )
-                }
-            }
-        }
-
-        /* ========================= */
-        stage('Approval Gate (ENFORCEMENT ONLY)') {
-        /* ========================= */
-
-            when {
-                expression { params.ENVIRONMENT != "DEV" }
-            }
-
-            steps {
-
-                script {
-
-                    timeout(time: 30, unit: 'MINUTES') {
-
-                        input message: """
-APPROVAL REQUIRED
-
-${env.AUDIT}
-
-Risk: ${env.RISK}
-
-Approve deployment?
-""",
-                        ok: "APPROVE"
+                    try {
+                        slackSend(
+                            channel: "#deployments",
+                            color: "#FFA500",
+                            message: msg
+                        )
+                    } catch (e) {
+                        echo "Slack failed (ignored): ${e}"
                     }
                 }
             }
         }
 
-        /* ========================= */
-        stage('Execute Liquibase') {
-        /* ========================= */
+        /* ============== APPROVAL GATE (REAL CONTROL) ============== */
+        stage('Approval Gate') {
+
+            when {
+                expression { params.ENVIRONMENT != 'DEV' }
+            }
+
+            steps {
+                timeout(time: 60, unit: 'MINUTES') {
+
+                    input message: """
+================ APPROVAL REQUIRED ================
+
+${env.AUDIT}
+
+Risk Level: ${env.RISK}
+
+Approve or Abort deployment
+==================================================
+""",
+                    ok: "APPROVE"
+                }
+            }
+        }
+
+        /* ============== EXECUTION ============== */
+        stage('Deploy') {
 
             steps {
 
                 sshagent(credentials: ['liquibase-ci-key']) {
 
                     sh """
-                    ssh ${REMOTE_USER}@${REMOTE_HOST} '
+                    ssh -T ${REMOTE_USER}@${REMOTE_HOST} '
                         set -e
                         cd ${WORKDIR}
 
                         echo "${env.AUDIT}"
 
                         ./liquibase validate
+                        ./liquibase updateSQL
 
                         if [ "${params.ACTION}" = "UPDATE" ]; then
                             ./liquibase update
-
                         elif [ "${params.ACTION}" = "ROLLBACK" ]; then
                             ./liquibase rollbackCount ${params.ROLLBACK_COUNT}
-
-                        elif [ "${params.ACTION}" = "UPDATESQL" ]; then
-                            ./liquibase updateSQL
-
-                        else
-                            ./liquibase validate
                         fi
 
                         ./liquibase history
@@ -208,7 +195,7 @@ Approve deployment?
         }
 
         aborted {
-            echo "USER ABORTED DEPLOYMENT"
+            echo "DEPLOYMENT ABORTED"
         }
     }
 }
