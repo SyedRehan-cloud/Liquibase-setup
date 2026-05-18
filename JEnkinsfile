@@ -1,0 +1,236 @@
+pipeline {
+
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+
+        choice(
+            name: 'ACTION',
+            choices: [
+                'VALIDATE',
+                'UPDATESQL',
+                'UPDATE',
+                'ROLLBACK'
+            ],
+            description: 'Select Liquibase operation'
+        )
+
+        choice(
+            name: 'ENVIRONMENT',
+            choices: [
+                'DEV',
+                'STAGING',
+                'PRODUCTION'
+            ],
+            description: 'Target deployment environment'
+        )
+
+        string(
+            name: 'ROLLBACK_COUNT',
+            defaultValue: '1',
+            description: 'Rollback count (only for rollback action)'
+        )
+    }
+
+    environment {
+
+        REMOTE_HOST = "18.216.116.201"
+        REMOTE_USER = "ubuntu"
+
+        DB_HOST = "localhost"
+        DB_PORT = "5432"
+        DB_NAME = "appdb"
+        DB_USER = "admin"
+        DB_PASS = "admin"
+
+        WORKDIR = "/home/ubuntu/liquibase-enterprise-poc"
+    }
+
+    stages {
+
+        stage('Capture Build User') {
+
+            steps {
+
+                wrap([$class: 'BuildUser']) {
+
+                    script {
+
+                        env.TRIGGERED_BY = "${BUILD_USER}"
+
+                        currentBuild.description =
+                            "Triggered By: ${BUILD_USER} | " +
+                            "Action: ${params.ACTION} | " +
+                            "Env: ${params.ENVIRONMENT}"
+
+                        echo "======================================="
+                        echo "BUILD TRIGGER INFORMATION"
+                        echo "======================================="
+
+                        echo "Triggered By : ${BUILD_USER}"
+                        echo "User ID      : ${BUILD_USER_ID}"
+                        echo "Action       : ${params.ACTION}"
+                        echo "Environment  : ${params.ENVIRONMENT}"
+
+                        echo "======================================="
+                    }
+                }
+            }
+        }
+
+        stage('Approval Gate') {
+
+            when {
+                expression {
+                    params.ENVIRONMENT == 'PRODUCTION'
+                }
+            }
+
+            steps {
+
+                input(
+                    message: """
+Approve Production Deployment?
+
+Triggered By : ${env.TRIGGERED_BY}
+Action       : ${params.ACTION}
+Environment  : ${params.ENVIRONMENT}
+                    """,
+                    ok: 'Approve Deployment'
+                )
+            }
+        }
+
+        stage('Run Liquibase on EC2') {
+
+            steps {
+
+                sshagent(credentials: ['liquibase-ci-key']) {
+
+                    sh """
+                    ssh -T -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} '
+                        set -e
+
+                        echo "========================================="
+                        echo "Liquibase Deployment Audit"
+                        echo "========================================="
+
+                        echo "Triggered By : ${TRIGGERED_BY}"
+                        echo "Action       : ${params.ACTION}"
+                        echo "Environment  : ${params.ENVIRONMENT}"
+                        echo "Execution At : \$(date)"
+
+                        echo "========================================="
+                        echo "Move to Working Directory"
+                        echo "========================================="
+
+                        cd ${WORKDIR}
+
+                        pwd
+                        ls -lah
+
+                        echo "========================================="
+                        echo "Liquibase Version"
+                        echo "========================================="
+
+                        ./liquibase --version
+
+                        echo "========================================="
+                        echo "Postgres Connectivity Check"
+                        echo "========================================="
+
+                        PGPASSWORD=${DB_PASS} psql \
+                          -h ${DB_HOST} \
+                          -U ${DB_USER} \
+                          -d ${DB_NAME} \
+                          -c "\\\\dt"
+
+                        echo "========================================="
+                        echo "Liquibase Validate"
+                        echo "========================================="
+
+                        ./liquibase validate
+
+                        echo "========================================="
+                        echo "Preview SQL"
+                        echo "========================================="
+
+                        ./liquibase updateSQL
+
+                        echo "========================================="
+                        echo "Execute Requested Action"
+                        echo "========================================="
+
+                        if [ "${params.ACTION}" = "VALIDATE" ]; then
+
+                            ./liquibase validate
+
+                        elif [ "${params.ACTION}" = "UPDATESQL" ]; then
+
+                            ./liquibase updateSQL
+
+                        elif [ "${params.ACTION}" = "UPDATE" ]; then
+
+                            ./liquibase update
+
+                        elif [ "${params.ACTION}" = "ROLLBACK" ]; then
+
+                            ./liquibase rollbackCount ${params.ROLLBACK_COUNT}
+
+                        fi
+
+                        echo "========================================="
+                        echo "Liquibase History"
+                        echo "========================================="
+
+                        ./liquibase history
+
+                        echo "========================================="
+                        echo "DATABASECHANGELOG Count"
+                        echo "========================================="
+
+                        PGPASSWORD=${DB_PASS} psql \
+                          -h ${DB_HOST} \
+                          -U ${DB_USER} \
+                          -d ${DB_NAME} \
+                          -c "SELECT COUNT(*) FROM databasechangelog;"
+
+                        echo "========================================="
+                        echo "Deployment Completed"
+                        echo "========================================="
+                    '
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+
+        success {
+
+            echo '======================================='
+            echo 'Liquibase Deployment SUCCESS'
+            echo '======================================='
+        }
+
+        failure {
+
+            echo '======================================='
+            echo 'Liquibase Deployment FAILED'
+            echo '======================================='
+        }
+
+        always {
+
+            echo '======================================='
+            echo 'Pipeline Execution Finished'
+            echo '======================================='
+        }
+    }
+}
