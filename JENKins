@@ -9,19 +9,47 @@ pipeline {
 
     parameters {
 
-        choice(name: 'ACTION',
-            choices: ['VALIDATE', 'UPDATESQL', 'UPDATE', 'ROLLBACK'],
+        choice(
+            name: 'ACTION',
+            choices: [
+                'VALIDATE',
+                'UPDATESQL',
+                'UPDATE',
+                'ROLLBACK_COUNT',
+                'ROLLBACK_TAG',
+                'ROLLBACK_CHANGESET'
+            ],
             description: 'Liquibase operation'
         )
 
-        choice(name: 'ENVIRONMENT',
+        choice(
+            name: 'ENVIRONMENT',
             choices: ['DEV', 'STAGING', 'PRODUCTION'],
             description: 'Target environment'
         )
 
-        string(name: 'ROLLBACK_COUNT',
+        string(
+            name: 'ROLLBACK_COUNT',
             defaultValue: '1',
             description: 'Rollback count'
+        )
+
+        string(
+            name: 'ROLLBACK_TAG',
+            defaultValue: '',
+            description: 'Rollback tag'
+        )
+
+        string(
+            name: 'CHANGESET_ID',
+            defaultValue: '',
+            description: 'Rollback changeset ID'
+        )
+
+        string(
+            name: 'CHANGESET_AUTHOR',
+            defaultValue: '',
+            description: 'Rollback changeset Author'
         )
     }
 
@@ -36,26 +64,38 @@ pipeline {
         DB_PASS = "admin"
 
         WORKDIR = "/home/ubuntu/liquibase-enterprise-poc"
+
+        LIQUIBASE_CMD = "./liquibase"
     }
 
     stages {
 
-        /* ================= AUDIT ================= */
+        /* =========================================================
+           AUDIT
+        ========================================================= */
         stage('Audit') {
+
             steps {
+
                 script {
 
-                    env.TRIGGERED_BY = currentBuild.getBuildCauses()[0]?.userId ?: "Unknown User"
+                    env.TRIGGERED_BY =
+                        currentBuild.getBuildCauses()[0]?.userId ?: "Unknown User"
 
                     env.AUDIT = """
 ================ DB CHANGE AUDIT ================
+
 User        : ${env.TRIGGERED_BY}
 Action      : ${params.ACTION}
 Environment : ${params.ENVIRONMENT}
-Rollback    : ${params.ROLLBACK_COUNT}
+
+Rollback Count : ${params.ROLLBACK_COUNT}
+Rollback Tag   : ${params.ROLLBACK_TAG}
+
 Job         : ${env.JOB_NAME}
 Build       : ${env.BUILD_NUMBER}
 URL         : ${env.BUILD_URL}
+
 =================================================
 """
 
@@ -64,24 +104,27 @@ URL         : ${env.BUILD_URL}
             }
         }
 
-        /* ============== POLICY ENGINE ============== */
+        /* =========================================================
+           POLICY ENGINE
+        ========================================================= */
         stage('Policy Engine') {
+
             steps {
+
                 script {
 
                     env.RISK = "LOW"
+
+                    if (params.ENVIRONMENT == 'STAGING') {
+                        env.RISK = "MEDIUM"
+                    }
 
                     if (params.ENVIRONMENT == 'PRODUCTION') {
                         env.RISK = "HIGH"
                     }
 
-                    if (params.ACTION == 'ROLLBACK') {
-                        env.RISK = "MEDIUM"
-                    }
-
-                    if (params.ENVIRONMENT == 'PRODUCTION' &&
-                        params.ACTION in ['UPDATE', 'UPDATESQL']) {
-                        env.RISK = "CRITICAL"
+                    if (params.ACTION.contains("ROLLBACK")) {
+                        env.RISK = "HIGH"
                     }
 
                     echo "Risk Level: ${env.RISK}"
@@ -89,7 +132,265 @@ URL         : ${env.BUILD_URL}
             }
         }
 
-        /* ============== NOTIFY ONLY ============== */
+        /* =========================================================
+           SQL GOVERNANCE VALIDATION
+        ========================================================= */
+        stage('SQL Governance Validation') {
+
+            steps {
+
+                script {
+
+                    def sqlFiles = sh(
+                        script: """
+                        find . \\( -name "*.sql" -o -name "*.xml" \\)
+                        """,
+                        returnStdout: true
+                    ).trim().split("\n")
+
+                    sqlFiles.each { file ->
+
+                        if (!file?.trim()) {
+                            return
+                        }
+
+                        echo "Scanning: ${file}"
+
+                        def content = readFile(file).toLowerCase()
+
+                        /* =========================================
+                           CREATE TABLE
+                        ========================================= */
+
+                        if (content.contains("create table")) {
+                            echo "CREATE TABLE detected"
+                        }
+
+                        /* =========================================
+                           CREATE INDEX
+                        ========================================= */
+
+                        if (content.contains("create index")) {
+                            echo "CREATE INDEX detected"
+                        }
+
+                        /* =========================================
+                           CONSTRAINTS
+                        ========================================= */
+
+                        if (
+                            content.contains("constraint") ||
+                            content.contains("primary key") ||
+                            content.contains("foreign key")
+                        ) {
+
+                            echo "CONSTRAINT change detected"
+                        }
+
+                        /* =========================================
+                           ADD COLUMN
+                        ========================================= */
+
+                        if (
+                            content.contains("add column") ||
+                            content.contains("addcolumn")
+                        ) {
+
+                            echo "ADD COLUMN detected"
+                        }
+
+                        /* =========================================
+                           MODIFY DATATYPE
+                        ========================================= */
+
+                        if (
+                            content.contains("modify") ||
+                            content.contains("alter column") ||
+                            content.contains("datatype")
+                        ) {
+
+                            echo "MODIFY DATATYPE detected"
+
+                            if (params.ENVIRONMENT != 'DEV') {
+
+                                input(
+                                    message:
+                                    "Datatype modification detected in ${file}. Approve?"
+                                )
+                            }
+                        }
+
+                        /* =========================================
+                           DROP TABLE
+                        ========================================= */
+
+                        if (content.contains("drop table")) {
+
+                            env.RISK = "CRITICAL"
+
+                            if (params.ENVIRONMENT == 'PRODUCTION') {
+                                error("DROP TABLE blocked in PROD")
+                            }
+
+                            input(
+                                message:
+                                "DROP TABLE detected in ${file}. Approve?"
+                            )
+                        }
+
+                        /* =========================================
+                           DROP COLUMN
+                        ========================================= */
+
+                        if (content.contains("drop column")) {
+
+                            env.RISK = "HIGH"
+
+                            input(
+                                message:
+                                "DROP COLUMN detected in ${file}. Approve?"
+                            )
+                        }
+
+                        /* =========================================
+                           TRUNCATE BLOCK
+                        ========================================= */
+
+                        if (content.contains("truncate")) {
+
+                            error("""
+TRUNCATE operation detected in ${file}
+
+TRUNCATE is NOT allowed in any environment.
+""")
+                        }
+
+                        /* =========================================
+                           UPDATE WITHOUT WHERE
+                        ========================================= */
+
+                        if (
+                            content =~
+                            /update\\s+.+\\s+set\\s+(?!.*where)/s
+                        ) {
+
+                            error("""
+Unsafe UPDATE without WHERE detected in ${file}
+""")
+                        }
+
+                        /* =========================================
+                           DELETE WITHOUT WHERE
+                        ========================================= */
+
+                        if (
+                            content =~
+                            /delete\\s+from\\s+.+(?!.*where)/s
+                        ) {
+
+                            error("""
+Unsafe DELETE without WHERE detected in ${file}
+""")
+                        }
+
+                        /* =========================================
+                           STORED PROCEDURES
+                        ========================================= */
+
+                        if (
+                            content.contains("procedure") ||
+                            content.contains("create or replace procedure")
+                        ) {
+
+                            echo "Stored Procedure deployment detected"
+
+                            if (params.ENVIRONMENT == 'PRODUCTION') {
+
+                                input(
+                                    message:
+                                    "Stored Procedure deployment detected in PROD. Approve?"
+                                )
+                            }
+                        }
+
+                        /* =========================================
+                           FUNCTIONS
+                        ========================================= */
+
+                        if (
+                            content.contains("function") ||
+                            content.contains("create or replace function")
+                        ) {
+
+                            echo "Function deployment detected"
+                        }
+
+                        /* =========================================
+                           ROLLBACK VALIDATION
+                        ========================================= */
+
+                        if (
+                            file.endsWith(".xml") &&
+                            !content.contains("<rollback>")
+                        ) {
+
+                            error("""
+Rollback block missing in ${file}
+All changesets must contain rollback.
+""")
+                        }
+                    }
+                }
+            }
+        }
+
+        /* =========================================================
+           PRODUCTION SAFEGUARDS
+        ========================================================= */
+        stage('Production Safeguards') {
+
+            when {
+                expression {
+                    params.ENVIRONMENT == 'PRODUCTION'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    echo "Applying Production Safeguards"
+
+                    if (params.ACTION == 'ROLLBACK_COUNT' ||
+                        params.ACTION == 'ROLLBACK_TAG' ||
+                        params.ACTION == 'ROLLBACK_CHANGESET') {
+
+                        error("""
+Rollback operations are BLOCKED in PRODUCTION
+""")
+                    }
+
+                    input(
+                        message: """
+================ PRODUCTION APPROVAL ================
+
+Risk Level : ${env.RISK}
+
+You are deploying to PRODUCTION.
+
+Please confirm CAB approval exists.
+
+====================================================
+""",
+                        ok: "APPROVE PROD DEPLOYMENT"
+                    )
+                }
+            }
+        }
+
+        /* =========================================================
+           NOTIFICATION
+        ========================================================= */
         stage('Notify Admin') {
 
             when {
@@ -97,38 +398,45 @@ URL         : ${env.BUILD_URL}
             }
 
             steps {
+
                 script {
 
                     def msg = """
 🚨 LIQUIBASE APPROVAL REQUIRED
 
 ${env.AUDIT}
+
 Risk Level : ${env.RISK}
 
-NO ACTION REQUIRED IN EMAIL
 Approve in Jenkins UI
 """
 
                     emailext(
                         to: "rehan.ali9325@gmail.com",
-                        subject: "Liquibase Approval - ${params.ENVIRONMENT}",
+                        subject:
+                        "Liquibase Approval - ${params.ENVIRONMENT}",
                         body: msg
                     )
 
                     try {
+
                         slackSend(
                             channel: "#deployments",
                             color: "#FFA500",
                             message: msg
                         )
+
                     } catch (e) {
-                        echo "Slack failed (ignored): ${e}"
+
+                        echo "Slack failed: ${e}"
                     }
                 }
             }
         }
 
-        /* ============== APPROVAL GATE (REAL CONTROL) ============== */
+        /* =========================================================
+           APPROVAL GATE
+        ========================================================= */
         stage('Approval Gate') {
 
             when {
@@ -136,9 +444,11 @@ Approve in Jenkins UI
             }
 
             steps {
+
                 timeout(time: 60, unit: 'MINUTES') {
 
-                    input message: """
+                    input(
+                        message: """
 ================ APPROVAL REQUIRED ================
 
 ${env.AUDIT}
@@ -146,14 +456,49 @@ ${env.AUDIT}
 Risk Level: ${env.RISK}
 
 Approve or Abort deployment
+
 ==================================================
 """,
-                    ok: "APPROVE"
+                        ok: "APPROVE"
+                    )
                 }
             }
         }
 
-        /* ============== EXECUTION ============== */
+        /* =========================================================
+           DATABASE BACKUP
+        ========================================================= */
+        stage('Database Backup') {
+
+            when {
+                expression {
+                    params.ENVIRONMENT == 'PRODUCTION'
+                }
+            }
+
+            steps {
+
+                sshagent(credentials: ['liquibase-ci-key']) {
+
+                    sh """
+                    ssh -T ${REMOTE_USER}@${REMOTE_HOST} '
+
+                        mkdir -p ${WORKDIR}/backup
+
+                        pg_dump \
+                        -h ${DB_HOST} \
+                        -U ${DB_USER} \
+                        ${DB_NAME} \
+                        > ${WORKDIR}/backup/backup_\$(date +%F_%H-%M-%S).sql
+                    '
+                    """
+                }
+            }
+        }
+
+        /* =========================================================
+           DEPLOY
+        ========================================================= */
         stage('Deploy') {
 
             steps {
@@ -162,21 +507,66 @@ Approve or Abort deployment
 
                     sh """
                     ssh -T ${REMOTE_USER}@${REMOTE_HOST} '
+
                         set -e
+
                         cd ${WORKDIR}
 
                         echo "${env.AUDIT}"
 
-                        ./liquibase validate
-                        ./liquibase updateSQL
+                        ${LIQUIBASE_CMD} validate
+
+                        ${LIQUIBASE_CMD} updateSQL
 
                         if [ "${params.ACTION}" = "UPDATE" ]; then
-                            ./liquibase update
-                        elif [ "${params.ACTION}" = "ROLLBACK" ]; then
-                            ./liquibase rollbackCount ${params.ROLLBACK_COUNT}
+
+                            ${LIQUIBASE_CMD} update
+
+                        elif [ "${params.ACTION}" = "ROLLBACK_COUNT" ]; then
+
+                            ${LIQUIBASE_CMD} rollbackCount ${params.ROLLBACK_COUNT}
+
+                        elif [ "${params.ACTION}" = "ROLLBACK_TAG" ]; then
+
+                            ${LIQUIBASE_CMD} rollback ${params.ROLLBACK_TAG}
+
+                        elif [ "${params.ACTION}" = "ROLLBACK_CHANGESET" ]; then
+
+                            ${LIQUIBASE_CMD} rollbackOneChangeSet \\
+                            --changesetId=${params.CHANGESET_ID} \\
+                            --changesetAuthor=${params.CHANGESET_AUTHOR}
+
                         fi
 
-                        ./liquibase history
+                        ${LIQUIBASE_CMD} history
+                    '
+                    """
+                }
+            }
+        }
+
+        /* =========================================================
+           TAG RELEASE
+        ========================================================= */
+        stage('Tag Release') {
+
+            when {
+                expression {
+                    params.ACTION == 'UPDATE'
+                }
+            }
+
+            steps {
+
+                sshagent(credentials: ['liquibase-ci-key']) {
+
+                    sh """
+                    ssh -T ${REMOTE_USER}@${REMOTE_HOST} '
+
+                        cd ${WORKDIR}
+
+                        ${LIQUIBASE_CMD} tag \
+                        release_${BUILD_NUMBER}
                     '
                     """
                 }
@@ -184,18 +574,45 @@ Approve or Abort deployment
         }
     }
 
+    /* =============================================================
+       POST
+    ============================================================= */
     post {
 
         success {
-            echo "DEPLOYMENT SUCCESS"
+
+            echo """
+=================================================
+DEPLOYMENT SUCCESS
+=================================================
+"""
         }
 
         failure {
-            echo "DEPLOYMENT FAILED"
+
+            echo """
+=================================================
+DEPLOYMENT FAILED
+=================================================
+"""
         }
 
         aborted {
-            echo "DEPLOYMENT ABORTED"
+
+            echo """
+=================================================
+DEPLOYMENT ABORTED
+=================================================
+"""
+        }
+
+        always {
+
+            archiveArtifacts(
+                artifacts: '**/*.log',
+                fingerprint: true,
+                allowEmptyArchive: true
+            )
         }
     }
 }
