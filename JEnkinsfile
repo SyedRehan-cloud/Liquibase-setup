@@ -1,4 +1,3 @@
-
 pipeline {
 
     agent any
@@ -45,33 +44,41 @@ pipeline {
 
     stages {
 
-        stage('Capture Build User') {
+        /* =========================
+           CAPTURE AUDIT INFO
+           ========================= */
+        stage('Capture Build Info') {
 
             steps {
                 script {
 
-                    env.TRIGGERED_BY = "${env.BUILD_USER ?: 'Unknown User'}"
+                    env.TRIGGERED_BY = currentBuild.getBuildCauses()[0]?.userId ?: "Unknown User"
+
+                    env.AUDIT_LOG =
+"""
+================ LIQUIBASE AUDIT =================
+Triggered By   : ${env.TRIGGERED_BY}
+Action         : ${params.ACTION}
+Environment    : ${params.ENVIRONMENT}
+Rollback Count : ${params.ROLLBACK_COUNT}
+Job Name       : ${env.JOB_NAME}
+Build Number   : ${env.BUILD_NUMBER}
+Build URL      : ${env.BUILD_URL}
+===================================================
+"""
 
                     currentBuild.description =
-                        "Triggered By: ${env.TRIGGERED_BY} | " +
-                        "Action: ${params.ACTION} | " +
-                        "Env: ${params.ENVIRONMENT}"
+                        "User: ${env.TRIGGERED_BY} | Action: ${params.ACTION} | Env: ${params.ENVIRONMENT}"
 
-                    echo "======================================="
-                    echo "BUILD TRIGGER INFORMATION"
-                    echo "======================================="
-                    echo "Triggered By : ${env.TRIGGERED_BY}"
-                    echo "Action       : ${params.ACTION}"
-                    echo "Environment  : ${params.ENVIRONMENT}"
-                    echo "======================================="
+                    echo env.AUDIT_LOG
                 }
             }
         }
 
         /* =========================
-           NEW: NOTIFICATION STAGE
+           NOTIFICATION (EMAIL + SLACK)
            ========================= */
-        stage('Notify Admin (Email + Slack)') {
+        stage('Notify Admin') {
 
             when {
                 expression {
@@ -83,34 +90,42 @@ pipeline {
 
                 script {
 
-                    def message = """
+                    def approvalUrl = "${env.BUILD_URL}input/"
+
+                    def message =
+"""
 ⚠ LIQUIBASE DEPLOYMENT APPROVAL REQUIRED
 
-Triggered By : ${env.TRIGGERED_BY}
-Action       : ${params.ACTION}
-Environment  : ${params.ENVIRONMENT}
+Triggered By   : ${env.TRIGGERED_BY}
+Action         : ${params.ACTION}
+Environment    : ${params.ENVIRONMENT}
 
-Jenkins Job  : ${env.JOB_NAME}
-Build URL    : ${env.BUILD_URL}
+JOB           : ${env.JOB_NAME}
+BUILD         : ${env.BUILD_NUMBER}
+
+👉 APPROVE HERE: ${approvalUrl}
 """
 
-                    // EMAIL NOTIFICATION
-                    emailext (
+                    // EMAIL
+                    emailext(
                         to: "rehan.ali9325@gmail.com",
-                        subject: "🚨 Jenkins Approval Required - ${params.ENVIRONMENT}",
+                        subject: "🚨 APPROVAL REQUIRED - ${params.ENVIRONMENT} Liquibase Deployment",
                         body: message
                     )
 
-                    // SLACK NOTIFICATION (requires Slack plugin configured)
-                    slackSend (
+                    // SLACK
+                    slackSend(
                         channel: "#deployments",
-                        color: "#FFA500",
+                        color: "#FF9900",
                         message: message
                     )
                 }
             }
         }
 
+        /* =========================
+           APPROVAL GATE (FIXED)
+           ========================= */
         stage('Approval Gate') {
 
             when {
@@ -123,23 +138,25 @@ Build URL    : ${env.BUILD_URL}
 
                 timeout(time: 30, unit: 'MINUTES') {
 
-                    input(
-                        message: """
-APPROVAL REQUIRED
+                    script {
 
-Triggered By : ${env.TRIGGERED_BY}
-Action       : ${params.ACTION}
-Environment  : ${params.ENVIRONMENT}
+                        input message: """
+${env.AUDIT_LOG}
 
-Approve or Abort in Jenkins UI
-                        """,
-                        ok: 'Approve Deployment',
-                        submitter: 'admin,newadmin,devops,release-manager'
-                    )
+⚠ APPROVAL REQUIRED
+
+Approve to proceed or Abort to stop deployment
+""",
+                        ok: "APPROVE DEPLOYMENT",
+                        submitter: "admin,newadmin,devops,release-manager"
+                    }
                 }
             }
         }
 
+        /* =========================
+           DEPLOYMENT STAGE
+           ========================= */
         stage('Run Liquibase on EC2') {
 
             steps {
@@ -150,26 +167,24 @@ Approve or Abort in Jenkins UI
                     ssh -T -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} '
                         set -e
 
-                        echo "========================================="
-                        echo "Liquibase Deployment Audit"
-                        echo "========================================="
-
-                        echo "Triggered By : ${env.TRIGGERED_BY}"
-                        echo "Action       : ${params.ACTION}"
-                        echo "Environment  : ${params.ENVIRONMENT}"
-                        echo "Execution At : \$(date)"
+                        echo "========== DEPLOYMENT START =========="
+                        echo "${env.AUDIT_LOG}"
 
                         cd ${WORKDIR}
+
+                        echo "Liquibase Version:"
                         ./liquibase --version
 
-                        PGPASSWORD=${DB_PASS} psql \
-                          -h ${DB_HOST} \
-                          -U ${DB_USER} \
-                          -d ${DB_NAME} \
-                          -c "\\\\dt"
+                        echo "DB State:"
+                        PGPASSWORD=${DB_PASS} psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c "\\\\dt"
 
+                        echo "VALIDATE:"
                         ./liquibase validate
+
+                        echo "UPDATE SQL PREVIEW:"
                         ./liquibase updateSQL
+
+                        echo "EXECUTING ACTION: ${params.ACTION}"
 
                         if [ "${params.ACTION}" = "VALIDATE" ]; then
                             ./liquibase validate
@@ -184,13 +199,11 @@ Approve or Abort in Jenkins UI
                             ./liquibase rollbackCount ${params.ROLLBACK_COUNT}
                         fi
 
+                        echo "HISTORY:"
                         ./liquibase history
 
-                        PGPASSWORD=${DB_PASS} psql \
-                          -h ${DB_HOST} \
-                          -U ${DB_USER} \
-                          -d ${DB_NAME} \
-                          -c "SELECT COUNT(*) FROM databasechangelog;"
+                        echo "CHANGE COUNT:"
+                        PGPASSWORD=${DB_PASS} psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c "SELECT COUNT(*) FROM databasechangelog;"
                     '
                     """
                 }
@@ -198,6 +211,9 @@ Approve or Abort in Jenkins UI
         }
     }
 
+    /* =========================
+       POST ACTIONS
+       ========================= */
     post {
 
         success {
@@ -212,9 +228,15 @@ Approve or Abort in Jenkins UI
             echo "======================================="
         }
 
+        aborted {
+            echo "======================================="
+            echo "Deployment ABORTED by user"
+            echo "======================================="
+        }
+
         always {
             echo "======================================="
-            echo "Pipeline Execution Finished"
+            echo "FULL PIPELINE EXECUTION COMPLETED"
             echo "======================================="
         }
     }
