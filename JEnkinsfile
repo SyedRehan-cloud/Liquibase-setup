@@ -54,31 +54,26 @@ pipeline {
     stages {
 
         stage('Capture Build User') {
-
             steps {
+                script {
 
-                wrap([$class: 'BuildUser']) {
+                    // No plugin required (reliable fallback)
+                    def cause = currentBuild.rawBuild.getCause(hudson.model.Cause.UserIdCause)
 
-                    script {
+                    env.TRIGGERED_BY = cause?.getUserName() ?: "Automated Trigger"
 
-                        env.TRIGGERED_BY = "${BUILD_USER}"
+                    currentBuild.description =
+                        "Triggered By: ${env.TRIGGERED_BY} | " +
+                        "Action: ${params.ACTION} | " +
+                        "Env: ${params.ENVIRONMENT}"
 
-                        currentBuild.description =
-                            "Triggered By: ${BUILD_USER} | " +
-                            "Action: ${params.ACTION} | " +
-                            "Env: ${params.ENVIRONMENT}"
-
-                        echo "======================================="
-                        echo "BUILD TRIGGER INFORMATION"
-                        echo "======================================="
-
-                        echo "Triggered By : ${BUILD_USER}"
-                        echo "User ID      : ${BUILD_USER_ID}"
-                        echo "Action       : ${params.ACTION}"
-                        echo "Environment  : ${params.ENVIRONMENT}"
-
-                        echo "======================================="
-                    }
+                    echo "======================================="
+                    echo "BUILD TRIGGER INFORMATION"
+                    echo "======================================="
+                    echo "Triggered By : ${env.TRIGGERED_BY}"
+                    echo "Action       : ${params.ACTION}"
+                    echo "Environment  : ${params.ENVIRONMENT}"
+                    echo "======================================="
                 }
             }
         }
@@ -87,22 +82,28 @@ pipeline {
 
             when {
                 expression {
-                    params.ENVIRONMENT == 'PRODUCTION'
+                    params.ENVIRONMENT in ['STAGING', 'PRODUCTION']
                 }
             }
 
             steps {
 
-                input(
-                    message: """
-Approve Production Deployment?
+                timeout(time: 30, unit: 'MINUTES') {
+
+                    input(
+                        message: """
+APPROVAL REQUIRED FOR DEPLOYMENT
 
 Triggered By : ${env.TRIGGERED_BY}
 Action       : ${params.ACTION}
 Environment  : ${params.ENVIRONMENT}
-                    """,
-                    ok: 'Approve Deployment'
-                )
+
+Approve to continue Liquibase deployment?
+                        """,
+                        ok: 'Approve Deployment',
+                        submitter: 'admin,newadmin,devops,release-manager'
+                    )
+                }
             }
         }
 
@@ -120,7 +121,7 @@ Environment  : ${params.ENVIRONMENT}
                         echo "Liquibase Deployment Audit"
                         echo "========================================="
 
-                        echo "Triggered By : ${TRIGGERED_BY}"
+                        echo "Triggered By : ${env.TRIGGERED_BY}"
                         echo "Action       : ${params.ACTION}"
                         echo "Environment  : ${params.ENVIRONMENT}"
                         echo "Execution At : \$(date)"
@@ -130,7 +131,6 @@ Environment  : ${params.ENVIRONMENT}
                         echo "========================================="
 
                         cd ${WORKDIR}
-
                         pwd
                         ls -lah
 
@@ -167,21 +167,16 @@ Environment  : ${params.ENVIRONMENT}
                         echo "========================================="
 
                         if [ "${params.ACTION}" = "VALIDATE" ]; then
-
                             ./liquibase validate
 
                         elif [ "${params.ACTION}" = "UPDATESQL" ]; then
-
                             ./liquibase updateSQL
 
                         elif [ "${params.ACTION}" = "UPDATE" ]; then
-
                             ./liquibase update
 
                         elif [ "${params.ACTION}" = "ROLLBACK" ]; then
-
                             ./liquibase rollbackCount ${params.ROLLBACK_COUNT}
-
                         fi
 
                         echo "========================================="
@@ -213,24 +208,21 @@ Environment  : ${params.ENVIRONMENT}
     post {
 
         success {
-
-            echo '======================================='
-            echo 'Liquibase Deployment SUCCESS'
-            echo '======================================='
+            echo "======================================="
+            echo "Liquibase Deployment SUCCESS"
+            echo "======================================="
         }
 
         failure {
-
-            echo '======================================='
-            echo 'Liquibase Deployment FAILED'
-            echo '======================================='
+            echo "======================================="
+            echo "Liquibase Deployment FAILED"
+            echo "======================================="
         }
 
         always {
-
-            echo '======================================='
-            echo 'Pipeline Execution Finished'
-            echo '======================================='
+            echo "======================================="
+            echo "Pipeline Execution Finished"
+            echo "======================================="
         }
     }
 }
